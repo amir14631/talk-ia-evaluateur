@@ -351,6 +351,7 @@ if envoyer:
 
                 if resp.status_code == 200:
                     raw    = resp.json()
+                    st.code(str(raw))
                     answer = (
                         raw.get("answer")
                         or raw.get("response")
