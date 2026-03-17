@@ -1,26 +1,26 @@
 """
 Talk IA - Evaluateur Maileva Docs e-Facture
-Version stable - Google Sheets + nettoyage JSON + badge formulaire
+Version stable - Google Sheets + nettoyage JSON + badge formulaire + nom obligatoire valide
 
 Lancement local :
   py -m pip install streamlit requests gspread google-auth
   streamlit run app.py
 
 Secrets Streamlit Cloud :
-  TALK_API_KEY = "ta_cle"
-  APP_PASSWORD = "maileva2026"
+  TALK_API_KEY   = "ta_cle"
+  APP_PASSWORD   = "maileva2026"
   SPREADSHEET_ID = "1AfJcWbTPMbSkbnthloOOspBSbAxN4ZMc-RmRlncltyA"
-  SHEET_NAME = "Feuille 1"
+  SHEET_NAME     = "Feuille 1"
 
   [gcp_service_account]
-  type = "service_account"
-  project_id = "talk-ia-eval"
-  private_key_id = "xxx"
-  private_key = "-----BEGIN RSA PRIVATE KEY-----\nxxx\n-----END RSA PRIVATE KEY-----\n"
-  client_email = "talk-ia-eval@talk-ia-eval.iam.gserviceaccount.com"
-  client_id = "xxx"
-  auth_uri = "https://accounts.google.com/o/oauth2/auth"
-  token_uri = "https://oauth2.googleapis.com/token"
+  type            = "service_account"
+  project_id      = "talk-ia-eval"
+  private_key_id  = "xxx"
+  private_key     = "-----BEGIN RSA PRIVATE KEY-----\nxxx\n-----END RSA PRIVATE KEY-----\n"
+  client_email    = "talk-ia-eval@talk-ia-eval.iam.gserviceaccount.com"
+  client_id       = "xxx"
+  auth_uri        = "https://accounts.google.com/o/oauth2/auth"
+  token_uri       = "https://oauth2.googleapis.com/token"
 """
 
 import datetime
@@ -67,7 +67,7 @@ def clean_answer(raw: str) -> str:
     text = re.sub(r"```(?:json)?\s*", "", text)
     text = re.sub(r"```", "", text)
     text = text.strip()
-    # Si c est du JSON valide, extraire les valeurs textuelles
+    # Si c'est du JSON valide, extraire les valeurs textuelles
     try:
         data = json.loads(text)
         if isinstance(data, dict):
@@ -75,7 +75,7 @@ def clean_answer(raw: str) -> str:
             for key, val in data.items():
                 if isinstance(val, str) and val.strip():
                     if key.lower() not in ("titre", "title"):
-                        parts.append(f"{key.replace('_',' ').capitalize()} : {val.strip()}")
+                        parts.append(f"{key.replace('_', ' ').capitalize()} : {val.strip()}")
                     else:
                         parts.append(val.strip())
                 elif isinstance(val, list):
@@ -88,6 +88,24 @@ def clean_answer(raw: str) -> str:
     except Exception:
         pass
     return text
+
+# ==============================================================================
+#  VALIDATION DU NOM
+# ==============================================================================
+
+def nom_est_valide(nom: str) -> bool:
+    """
+    Valide que le nom contient au moins :
+    - 2 mots (prenom + nom)
+    - 3 caracteres minimum
+    - Uniquement des lettres, espaces et tirets (accents acceptes)
+    """
+    nom = nom.strip()
+    return (
+        len(nom) >= 3
+        and len(nom.split()) >= 2
+        and bool(re.match(r"^[a-zA-Z\u00C0-\u024F\s\-]+$", nom))
+    )
 
 # ==============================================================================
 #  GOOGLE SHEETS
@@ -107,9 +125,9 @@ def init_headers(sheet):
     try:
         if not sheet.get_all_values():
             sheet.insert_row([
-                "Timestamp","Evaluateur","Equipe",
-                "Question","Reponse Talk IA","Score /5",
-                "Commentaire","Latence (ms)"
+                "Timestamp", "Evaluateur", "Equipe",
+                "Question", "Reponse Talk IA", "Score /5",
+                "Commentaire", "Latence (ms)"
             ], index=1)
     except Exception:
         pass
@@ -117,13 +135,13 @@ def init_headers(sheet):
 def save_row(sheet, entry: dict) -> bool:
     try:
         sheet.append_row([
-            entry.get("timestamp",""),
-            entry.get("nom",""),
-            entry.get("equipe",""),
-            entry.get("question",""),
-            entry.get("answer",""),
+            entry.get("timestamp", ""),
+            entry.get("nom", ""),
+            entry.get("equipe", ""),
+            entry.get("question", ""),
+            entry.get("answer", ""),
             entry.get("score", 0),
-            entry.get("explication",""),
+            entry.get("explication", ""),
             entry.get("latency_ms", 0),
         ])
         return True
@@ -259,7 +277,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ==============================================================================
-#  ETAPE 2 : NOM OBLIGATOIRE
+#  ETAPE 2 : NOM OBLIGATOIRE (validation stricte)
 # ==============================================================================
 
 if not st.session_state.user_nom:
@@ -272,20 +290,23 @@ if not st.session_state.user_nom:
     """, unsafe_allow_html=True)
 
     st.markdown("### Qui etes-vous ?")
-    st.info("Votre nom sera enregistre avec chaque evaluation pour que les resultats soient attribues correctement.")
+    st.info("Votre nom sera enregistre avec chaque evaluation. Merci d'entrer votre vrai Prenom et Nom.")
 
     c1, c2 = st.columns(2)
     with c1:
-        nom_inp = st.text_input("Prenom et Nom *", placeholder="ex : Sophie Martin")
+        nom_inp = st.text_input(
+            "Prenom et Nom *",
+            placeholder="ex : Sophie Martin",
+        )
     with c2:
-        eq_inp  = st.selectbox("Equipe *", [
-            "-- Selectionnez --","Commercial","Avant-vente",
-            "Marketing","Support","Produit","Direction","Autre",
+        eq_inp = st.selectbox("Equipe *", [
+            "-- Selectionnez --", "Commercial", "Avant-vente",
+            "Marketing", "Support", "Produit", "Direction", "Autre",
         ])
 
     if st.button("Commencer l'evaluation", type="primary"):
-        if not nom_inp.strip():
-            st.error("Votre nom est obligatoire.")
+        if not nom_est_valide(nom_inp):
+            st.error("Merci d'entrer votre vrai Prenom et Nom (ex : Sophie Martin).")
         elif eq_inp == "-- Selectionnez --":
             st.error("Selectionnez votre equipe.")
         else:
@@ -329,7 +350,7 @@ st.markdown(f"""
 
 if st.session_state.history:
     scores = [r["score"] for r in st.session_state.history]
-    avg    = round(sum(scores)/len(scores), 1)
+    avg    = round(sum(scores) / len(scores), 1)
     nb_ok  = sum(1 for s in scores if s >= 4)
     nb_nok = sum(1 for s in scores if s <= 2)
     st.markdown(f"""
@@ -366,11 +387,12 @@ if envoyer:
                 t0   = time.time()
                 resp = requests.post(
                     TALK_URL,
-                    headers={"Content-Type":"application/json","x-user-api-key":API_KEY},
+                    headers={"Content-Type": "application/json",
+                             "x-user-api-key": API_KEY},
                     json={"prompt": question_input.strip()},
                     timeout=30,
                 )
-                lat = int((time.time()-t0)*1000)
+                lat = int((time.time() - t0) * 1000)
 
                 if resp.status_code == 200:
                     raw = resp.json()
@@ -414,13 +436,13 @@ if st.session_state.pending:
     st.markdown("### Notez cette reponse")
 
     score = st.select_slider(
-        "Note", options=[1,2,3,4,5], value=3,
+        "Note", options=[1, 2, 3, 4, 5], value=3,
         format_func=lambda x: {
-            1:"1 — Completement faux ou hors sujet",
-            2:"2 — Insuffisant ou incorrect",
-            3:"3 — Correct mais incomplet",
-            4:"4 — Bonne reponse, complete",
-            5:"5 — Excellente reponse, precise et complete",
+            1: "1 — Completement faux ou hors sujet",
+            2: "2 — Insuffisant ou incorrect",
+            3: "3 — Correct mais incomplet",
+            4: "4 — Bonne reponse, complete",
+            5: "5 — Excellente reponse, precise et complete",
         }[x],
     )
     explication = st.text_area(
@@ -429,7 +451,7 @@ if st.session_state.pending:
         height=100,
     )
 
-    cv, ca = st.columns([2,1])
+    cv, ca = st.columns([2, 1])
     with cv:
         valider = st.button("Valider la note", type="primary", use_container_width=True)
     with ca:
@@ -462,8 +484,8 @@ if st.session_state.history:
 
     for e in reversed(st.session_state.history):
         s     = e["score"]
-        label = {5:"Excellente",4:"Bonne",3:"Correcte",2:"Insuffisante",1:"Mauvaise"}.get(s,"")
-        stars = "★"*s + "☆"*(5-s)
+        label = {5:"Excellente",4:"Bonne",3:"Correcte",2:"Insuffisante",1:"Mauvaise"}.get(s, "")
+        stars = "★" * s + "☆" * (5 - s)
         expl  = (f"<br><span style='font-size:0.85rem;color:#6b7280;'>"
                  f"Commentaire : {e['explication']}</span>"
                  if e.get("explication") else "")
@@ -471,11 +493,13 @@ if st.session_state.history:
         st.markdown(f"""
         <div class="card">
           <div class="card-meta">
-            {e['timestamp']} &nbsp;·&nbsp; {e['nom']} ({e['equipe']}) &nbsp;·&nbsp; {e['latency_ms']} ms
+            {e['timestamp']} &nbsp;·&nbsp; {e['nom']} ({e['equipe']})
+            &nbsp;·&nbsp; {e['latency_ms']} ms
           </div>
           <div class="bubble-q">Q : {e['question']}</div>
-          <div style="font-size:0.9rem;color:#374151;line-height:1.6;padding:6px 0;white-space:pre-wrap;">
-            {e['answer'][:500]}{'...' if len(e['answer'])>500 else ''}
+          <div style="font-size:0.9rem;color:#374151;line-height:1.6;
+                      padding:6px 0;white-space:pre-wrap;">
+            {e['answer'][:500]}{'...' if len(e['answer']) > 500 else ''}
           </div>
           <span class="sbadge s{s}">{stars} {label}</span>
           {expl}
