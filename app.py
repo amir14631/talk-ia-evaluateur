@@ -28,6 +28,8 @@ Deploiement Streamlit Cloud :
 """
 
 import datetime
+import json
+import re
 import time
 
 import gspread
@@ -40,13 +42,11 @@ from google.oauth2.service_account import Credentials
 # ==============================================================================
 
 try:
-    # Mode production Streamlit Cloud
     API_KEY        = st.secrets["TALK_API_KEY"]
     APP_PASSWORD   = st.secrets["APP_PASSWORD"]
     SPREADSHEET_ID = st.secrets["SPREADSHEET_ID"]
     SHEET_NAME     = st.secrets["SHEET_NAME"]
 except Exception:
-    # Mode local
     API_KEY        = "COLLE_TA_CLE_ICI"
     APP_PASSWORD   = "maileva2026"
     SPREADSHEET_ID = "1AfJcWbTPMbSkbnthloOOspBSbAxN4ZMc-RmRlncltyA"
@@ -60,15 +60,62 @@ SCOPES = [
 ]
 
 # ==============================================================================
+#  NETTOYAGE DE LA REPONSE TALK IA
+#  Supprime les blocs ```json ... ``` et extrait le texte lisible
+# ==============================================================================
+
+def clean_answer(raw_answer: str) -> str:
+    """
+    Nettoie la reponse de Talk IA :
+    - Supprime les blocs ```json ... ``` et ``` ... ```
+    - Si la reponse est un JSON, extrait les valeurs textuelles
+    - Retourne un texte propre et lisible
+    """
+    if not raw_answer:
+        return raw_answer
+
+    text = raw_answer.strip()
+
+    # Supprimer les blocs ```json ... ``` ou ``` ... ```
+    text = re.sub(r"```(?:json)?\s*", "", text)
+    text = re.sub(r"```", "", text)
+    text = text.strip()
+
+    # Essayer de parser comme JSON et extraire les valeurs textuelles
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            # Concatener toutes les valeurs string du JSON dans l'ordre
+            parts = []
+            for key, val in data.items():
+                if isinstance(val, str) and val.strip():
+                    # Ajouter un titre si la cle est informative
+                    key_clean = key.replace("_", " ").capitalize()
+                    if key_clean.lower() not in ("titre", "title"):
+                        parts.append(f"{key_clean} : {val.strip()}")
+                    else:
+                        parts.append(val.strip())
+                elif isinstance(val, list):
+                    items = [str(v) for v in val if str(v).strip()]
+                    if items:
+                        parts.append("\n".join(f"- {v}" for v in items))
+            return "\n\n".join(parts) if parts else text
+        elif isinstance(data, list):
+            return "\n".join(f"- {str(item)}" for item in data if str(item).strip())
+        elif isinstance(data, str):
+            return data.strip()
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    return text
+
+
+# ==============================================================================
 #  CONNEXION GOOGLE SHEETS
 # ==============================================================================
 
 @st.cache_resource
 def get_sheet():
-    """
-    Ouvre la connexion au Google Sheets via le Service Account.
-    Cache la connexion pour ne pas la refaire a chaque interaction.
-    """
     try:
         creds  = Credentials.from_service_account_info(
             st.secrets["gcp_service_account"],
@@ -77,16 +124,13 @@ def get_sheet():
         client = gspread.authorize(creds)
         sheet  = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
         return sheet
-    except Exception as e:
+    except Exception:
         return None
 
 
 def init_sheet_headers(sheet):
-    """
-    Ajoute les en-tetes si la feuille est vide.
-    """
     try:
-        if sheet.row_count == 0 or sheet.cell(1, 1).value != "Timestamp":
+        if not sheet.get_all_values():
             sheet.insert_row([
                 "Timestamp",
                 "Evaluateur",
@@ -101,10 +145,7 @@ def init_sheet_headers(sheet):
         pass
 
 
-def save_to_sheet(sheet, entry: dict):
-    """
-    Ajoute une ligne d'evaluation dans le Google Sheets.
-    """
+def save_to_sheet(sheet, entry: dict) -> bool:
     try:
         sheet.append_row([
             entry.get("timestamp", ""),
@@ -117,7 +158,7 @@ def save_to_sheet(sheet, entry: dict):
             entry.get("latency_ms", 0),
         ])
         return True
-    except Exception as e:
+    except Exception:
         return False
 
 # ==============================================================================
@@ -167,9 +208,34 @@ st.markdown("""
     border-radius: 12px;
     padding: 12px 20px;
     margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .user-banner .info {
     font-size: 0.95rem;
     color: #0018A8;
     font-weight: 500;
+    flex: 1;
+  }
+  .form-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #d1fae5;
+    border: 1.5px solid #10b981;
+    color: #065f46;
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 4px 12px;
+    border-radius: 20px;
+    white-space: nowrap;
+  }
+  .form-badge.disconnected {
+    background: #fee2e2;
+    border-color: #ef4444;
+    color: #991b1b;
   }
   .bubble-q {
     background: #e8ecff;
@@ -246,15 +312,15 @@ st.markdown("""
 #  SESSION STATE
 # ==============================================================================
 
-if "authenticated"  not in st.session_state:
+if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
-if "user_nom"       not in st.session_state:
+if "user_nom" not in st.session_state:
     st.session_state.user_nom = ""
-if "user_equipe"    not in st.session_state:
+if "user_equipe" not in st.session_state:
     st.session_state.user_equipe = ""
-if "history"        not in st.session_state:
+if "history" not in st.session_state:
     st.session_state.history = []
-if "pending"        not in st.session_state:
+if "pending" not in st.session_state:
     st.session_state.pending = None
 
 # ==============================================================================
@@ -341,6 +407,12 @@ sheet = get_sheet()
 if sheet:
     init_sheet_headers(sheet)
 
+form_badge = (
+    '<span class="form-badge">● Formulaire connecte</span>'
+    if sheet else
+    '<span class="form-badge disconnected">● Formulaire deconnecte</span>'
+)
+
 # Header
 st.markdown(f"""
 <div class="main-header">
@@ -349,13 +421,15 @@ st.markdown(f"""
   <p>Testez Talk IA sur Maileva Docs e-Facture et notez les reponses.</p>
 </div>
 <div class="user-banner">
-  Connecte en tant que : <strong>{nom}</strong>
-  &nbsp;·&nbsp; Equipe : <strong>{equipe}</strong>
-  &nbsp;·&nbsp; {'✅ Google Sheets connecte' if sheet else '⚠️ Google Sheets non connecte'}
+  <div class="info">
+    Connecte en tant que : <strong>{nom}</strong>
+    &nbsp;·&nbsp; Equipe : <strong>{equipe}</strong>
+  </div>
+  {form_badge}
 </div>
 """, unsafe_allow_html=True)
 
-# ── Stats de la session en cours ───────────────────────────────────────────────
+# ── Stats ──────────────────────────────────────────────────────────────────────
 
 if st.session_state.history:
     scores = [r["score"] for r in st.session_state.history]
@@ -375,11 +449,11 @@ if st.session_state.history:
       </div>
       <div class="stat-box">
         <div class="val" style="color:#10b981">{nb_ok}</div>
-        <div class="lbl">Bonnes (>= 4)</div>
+        <div class="lbl">Bonnes (&ge; 4)</div>
       </div>
       <div class="stat-box">
         <div class="val" style="color:#ef4444">{nb_nok}</div>
-        <div class="lbl">Mauvaises (<= 2)</div>
+        <div class="lbl">Mauvaises (&le; 2)</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -422,7 +496,7 @@ if envoyer:
 
                 if resp.status_code == 200:
                     raw    = resp.json()
-                    answer = (
+                    raw_answer = (
                         raw.get("answer")
                         or raw.get("response")
                         or raw.get("result")
@@ -431,6 +505,9 @@ if envoyer:
                         or raw.get("content")
                         or str(raw)
                     )
+                    # Nettoyer le JSON / les backticks
+                    answer = clean_answer(raw_answer)
+
                     st.session_state.pending = {
                         "question":   question_input.strip(),
                         "answer":     answer,
@@ -501,19 +578,18 @@ if st.session_state.pending:
             "explication": explication.strip(),
         }
 
-        # Sauvegarde dans Google Sheets
         if sheet:
             saved = save_to_sheet(sheet, entry)
             if saved:
                 st.markdown("""
                 <div class="saved-banner">
-                  ✅ Evaluation sauvegardee dans Google Sheets
+                  ✅ Evaluation enregistree
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                st.warning("Evaluation enregistree en local mais echec de la sauvegarde Google Sheets.")
+                st.warning("Echec de la sauvegarde dans le formulaire.")
         else:
-            st.warning("Google Sheets non connecte — evaluation enregistree en local uniquement.")
+            st.warning("Formulaire non connecte — evaluation enregistree en local uniquement.")
 
         st.session_state.history.append(entry)
         st.session_state.pending = None
@@ -523,12 +599,11 @@ if st.session_state.pending:
         st.session_state.pending = None
         st.rerun()
 
-# ── Historique de la session ───────────────────────────────────────────────────
+# ── Historique ─────────────────────────────────────────────────────────────────
 
 if st.session_state.history:
     st.markdown("<hr class='soft'>", unsafe_allow_html=True)
     st.markdown(f"### Mes evaluations cette session ({len(st.session_state.history)})")
-    st.caption("Toutes vos evaluations sont automatiquement sauvegardees dans Google Sheets.")
 
     for entry in reversed(st.session_state.history):
         s     = entry["score"]
