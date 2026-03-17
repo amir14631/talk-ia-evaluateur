@@ -1,6 +1,6 @@
 """
 Talk IA - Evaluateur Maileva Docs e-Facture
-Version sans mot de passe - nom obligatoire + Google Sheets + nettoyage JSON
+Version stable - Google Sheets + nettoyage JSON + badge formulaire + nom obligatoire valide
 
 Lancement local :
   py -m pip install streamlit requests gspread google-auth
@@ -8,6 +8,7 @@ Lancement local :
 
 Secrets Streamlit Cloud :
   TALK_API_KEY   = "ta_cle"
+  APP_PASSWORD   = "maileva2026"
   SPREADSHEET_ID = "1AfJcWbTPMbSkbnthloOOspBSbAxN4ZMc-RmRlncltyA"
   SHEET_NAME     = "Feuille 1"
 
@@ -38,10 +39,12 @@ from google.oauth2.service_account import Credentials
 
 try:
     API_KEY        = st.secrets["TALK_API_KEY"]
+    APP_PASSWORD   = st.secrets["APP_PASSWORD"]
     SPREADSHEET_ID = st.secrets["SPREADSHEET_ID"]
     SHEET_NAME     = st.secrets["SHEET_NAME"]
 except Exception:
     API_KEY        = "COLLE_TA_CLE_ICI"
+    APP_PASSWORD   = "maileva2026"
     SPREADSHEET_ID = "1AfJcWbTPMbSkbnthloOOspBSbAxN4ZMc-RmRlncltyA"
     SHEET_NAME     = "Feuille 1"
 
@@ -53,15 +56,18 @@ SCOPES   = [
 
 # ==============================================================================
 #  NETTOYAGE REPONSE TALK IA
+#  Enleve les ```json { ... } ``` et retourne un texte propre
 # ==============================================================================
 
 def clean_answer(raw: str) -> str:
     if not raw:
         return raw
     text = raw.strip()
+    # Supprimer les blocs ```json ... ``` ou ``` ... ```
     text = re.sub(r"```(?:json)?\s*", "", text)
     text = re.sub(r"```", "", text)
     text = text.strip()
+    # Si c'est du JSON valide, extraire les valeurs textuelles
     try:
         data = json.loads(text)
         if isinstance(data, dict):
@@ -88,6 +94,12 @@ def clean_answer(raw: str) -> str:
 # ==============================================================================
 
 def nom_est_valide(nom: str) -> bool:
+    """
+    Valide que le nom contient au moins :
+    - 2 mots (prenom + nom)
+    - 3 caracteres minimum
+    - Uniquement des lettres, espaces et tirets (accents acceptes)
+    """
     nom = nom.strip()
     return (
         len(nom) >= 3
@@ -231,16 +243,41 @@ st.markdown("""
 # ==============================================================================
 
 for key, val in {
-    "user_nom":    "",
-    "user_equipe": "",
-    "history":     [],
-    "pending":     None,
+    "authenticated": False,
+    "user_nom":      "",
+    "user_equipe":   "",
+    "history":       [],
+    "pending":       None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
 # ==============================================================================
-#  ETAPE 1 : NOM OBLIGATOIRE (validation stricte)
+#  ETAPE 1 : MOT DE PASSE
+# ==============================================================================
+
+if not st.session_state.authenticated:
+    st.markdown("""
+    <div class="main-header">
+      <div class="badge">USAGE INTERNE MAILEVA</div>
+      <h1>💬 Talk IA — Evaluateur</h1>
+      <p>Testez Talk IA sur Maileva Docs e-Facture et notez les reponses.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### Acces securise")
+    pwd = st.text_input("Mot de passe", type="password",
+                        placeholder="Saisir le mot de passe...")
+    if st.button("Entrer", type="primary"):
+        if pwd == APP_PASSWORD:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Mot de passe incorrect. Contactez Amir pour obtenir l'acces.")
+    st.stop()
+
+# ==============================================================================
+#  ETAPE 2 : NOM OBLIGATOIRE (validation stricte)
 # ==============================================================================
 
 if not st.session_state.user_nom:
@@ -257,7 +294,10 @@ if not st.session_state.user_nom:
 
     c1, c2 = st.columns(2)
     with c1:
-        nom_inp = st.text_input("Prenom et Nom *", placeholder="ex : Sophie Martin")
+        nom_inp = st.text_input(
+            "Prenom et Nom *",
+            placeholder="ex : Sophie Martin",
+        )
     with c2:
         eq_inp = st.selectbox("Equipe *", [
             "-- Selectionnez --", "Commercial", "Avant-vente",
