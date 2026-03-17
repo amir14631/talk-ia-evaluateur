@@ -1,46 +1,124 @@
 """
 Talk IA - Evaluateur Maileva Docs e-Facture
-Usage interne - avec securite, nom obligatoire, export Excel par evaluateur
+Usage interne - securise, nom obligatoire, sauvegarde Google Sheets
 
 Lancement local :
-  py -m pip install streamlit requests openpyxl
+  py -m pip install streamlit requests gspread google-auth
   streamlit run app.py
 
 Deploiement Streamlit Cloud :
   1. Push app.py + requirements.txt sur GitHub
   2. https://share.streamlit.io -> New app
-  3. Dans Settings -> Secrets, ajouter :
-       TALK_API_KEY = "ta_cle_api"
-       APP_PASSWORD = "le_mot_de_passe"
+  3. Settings -> Secrets -> coller le bloc ci-dessous :
+
+    TALK_API_KEY = "ta_cle_talk_ia"
+    APP_PASSWORD = "maileva2026"
+    SPREADSHEET_ID = "1AfJcWbTPMbSkbnthloOOspBSbAxN4ZMc-RmRlncltyA"
+    SHEET_NAME = "Feuille 1"
+
+    [gcp_service_account]
+    type = "service_account"
+    project_id = "talk-ia-eval"
+    private_key_id = "xxx"
+    private_key = "-----BEGIN RSA PRIVATE KEY-----\nxxx\n-----END RSA PRIVATE KEY-----\n"
+    client_email = "talk-ia-eval@talk-ia-eval.iam.gserviceaccount.com"
+    client_id = "xxx"
+    auth_uri = "https://accounts.google.com/o/oauth2/auth"
+    token_uri = "https://oauth2.googleapis.com/token"
 """
 
 import datetime
-import io
 import time
-from collections import defaultdict
 
+import gspread
 import requests
 import streamlit as st
-import openpyxl
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+from google.oauth2.service_account import Credentials
 
 # ==============================================================================
 #  CONFIGURATION
-#  En local : modifie directement les valeurs ci-dessous
-#  En prod   : utilise st.secrets (Streamlit Cloud -> Settings -> Secrets)
 # ==============================================================================
 
 try:
     # Mode production Streamlit Cloud
-    API_KEY      = st.secrets["TALK_API_KEY"]
-    APP_PASSWORD = st.secrets["APP_PASSWORD"]
+    API_KEY        = st.secrets["TALK_API_KEY"]
+    APP_PASSWORD   = st.secrets["APP_PASSWORD"]
+    SPREADSHEET_ID = st.secrets["SPREADSHEET_ID"]
+    SHEET_NAME     = st.secrets["SHEET_NAME"]
 except Exception:
-    # Mode local : mets tes valeurs ici
-    API_KEY      = "COLLE_TA_CLE_ICI"
-    APP_PASSWORD = "maileva2026"      # <- mot de passe pour acceder a l'app
+    # Mode local
+    API_KEY        = "COLLE_TA_CLE_ICI"
+    APP_PASSWORD   = "maileva2026"
+    SPREADSHEET_ID = "1AfJcWbTPMbSkbnthloOOspBSbAxN4ZMc-RmRlncltyA"
+    SHEET_NAME     = "Feuille 1"
 
 TALK_URL = "https://talk.innovation.docaposte.com/api/TALK/ask"
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+# ==============================================================================
+#  CONNEXION GOOGLE SHEETS
+# ==============================================================================
+
+@st.cache_resource
+def get_sheet():
+    """
+    Ouvre la connexion au Google Sheets via le Service Account.
+    Cache la connexion pour ne pas la refaire a chaque interaction.
+    """
+    try:
+        creds  = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=SCOPES,
+        )
+        client = gspread.authorize(creds)
+        sheet  = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+        return sheet
+    except Exception as e:
+        return None
+
+
+def init_sheet_headers(sheet):
+    """
+    Ajoute les en-tetes si la feuille est vide.
+    """
+    try:
+        if sheet.row_count == 0 or sheet.cell(1, 1).value != "Timestamp":
+            sheet.insert_row([
+                "Timestamp",
+                "Evaluateur",
+                "Equipe",
+                "Question",
+                "Reponse Talk IA",
+                "Score /5",
+                "Commentaire",
+                "Latence (ms)",
+            ], index=1)
+    except Exception:
+        pass
+
+
+def save_to_sheet(sheet, entry: dict):
+    """
+    Ajoute une ligne d'evaluation dans le Google Sheets.
+    """
+    try:
+        sheet.append_row([
+            entry.get("timestamp", ""),
+            entry.get("nom", ""),
+            entry.get("equipe", ""),
+            entry.get("question", ""),
+            entry.get("answer", ""),
+            entry.get("score", 0),
+            entry.get("explication", ""),
+            entry.get("latency_ms", 0),
+        ])
+        return True
+    except Exception as e:
+        return False
 
 # ==============================================================================
 #  CONFIG PAGE
@@ -83,7 +161,6 @@ st.markdown("""
     border-radius: 20px;
     margin-bottom: 12px;
   }
-
   .user-banner {
     background: #e8ecff;
     border: 2px solid #0018A8;
@@ -94,7 +171,6 @@ st.markdown("""
     color: #0018A8;
     font-weight: 500;
   }
-
   .bubble-q {
     background: #e8ecff;
     border-left: 4px solid #0018A8;
@@ -151,17 +227,16 @@ st.markdown("""
   .stat-box .val { font-size: 1.8rem; font-weight: 700; color: #0018A8; line-height: 1; }
   .stat-box .lbl { font-size: 0.72rem; color: #6b7280; margin-top: 4px; }
 
-  .login-box {
-    background: white;
-    border-radius: 16px;
-    padding: 36px 40px;
-    box-shadow: 0 4px 24px rgba(0,24,168,0.10);
-    border: 1px solid #e8ecff;
-    max-width: 420px;
-    margin: 60px auto;
+  .saved-banner {
+    background: #d1fae5;
+    border: 2px solid #10b981;
+    border-radius: 10px;
+    padding: 10px 16px;
+    color: #065f46;
+    font-size: 0.9rem;
+    font-weight: 500;
+    margin-top: 8px;
   }
-  .login-box h2 { color: #0018A8; margin-bottom: 6px; font-size: 1.3rem; }
-  .login-box p  { color: #6b7280; font-size: 0.9rem; margin-bottom: 24px; }
 
   hr.soft { border: none; border-top: 1px solid #e8ecff; margin: 22px 0; }
 </style>
@@ -171,15 +246,15 @@ st.markdown("""
 #  SESSION STATE
 # ==============================================================================
 
-if "authenticated" not in st.session_state:
+if "authenticated"  not in st.session_state:
     st.session_state.authenticated = False
-if "user_nom" not in st.session_state:
+if "user_nom"       not in st.session_state:
     st.session_state.user_nom = ""
-if "user_equipe" not in st.session_state:
+if "user_equipe"    not in st.session_state:
     st.session_state.user_equipe = ""
-if "history" not in st.session_state:
+if "history"        not in st.session_state:
     st.session_state.history = []
-if "pending" not in st.session_state:
+if "pending"        not in st.session_state:
     st.session_state.pending = None
 
 # ==============================================================================
@@ -187,7 +262,6 @@ if "pending" not in st.session_state:
 # ==============================================================================
 
 if not st.session_state.authenticated:
-
     st.markdown("""
     <div class="main-header">
       <div class="badge">USAGE INTERNE MAILEVA</div>
@@ -196,20 +270,18 @@ if not st.session_state.authenticated:
     </div>
     """, unsafe_allow_html=True)
 
-    with st.container():
-        st.markdown("### Acces securise")
-        pwd = st.text_input(
-            "Mot de passe",
-            type="password",
-            placeholder="Saisir le mot de passe...",
-        )
-        if st.button("Entrer", type="primary"):
-            if pwd == APP_PASSWORD:
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Mot de passe incorrect. Contactez Amir pour obtenir l'acces.")
-
+    st.markdown("### Acces securise")
+    pwd = st.text_input(
+        "Mot de passe",
+        type="password",
+        placeholder="Saisir le mot de passe...",
+    )
+    if st.button("Entrer", type="primary"):
+        if pwd == APP_PASSWORD:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Mot de passe incorrect. Contactez Amir pour obtenir l'acces.")
     st.stop()
 
 # ==============================================================================
@@ -217,7 +289,6 @@ if not st.session_state.authenticated:
 # ==============================================================================
 
 if not st.session_state.user_nom:
-
     st.markdown("""
     <div class="main-header">
       <div class="badge">USAGE INTERNE MAILEVA</div>
@@ -227,7 +298,7 @@ if not st.session_state.user_nom:
     """, unsafe_allow_html=True)
 
     st.markdown("### Qui etes-vous ?")
-    st.info("Votre nom apparaitra dans le rapport Excel pour que les resultats soient attribues correctement.")
+    st.info("Votre nom sera enregistre avec chaque evaluation pour que les resultats soient attribues correctement.")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -256,7 +327,6 @@ if not st.session_state.user_nom:
             st.session_state.user_nom    = nom_input.strip()
             st.session_state.user_equipe = equipe_input
             st.rerun()
-
     st.stop()
 
 # ==============================================================================
@@ -266,21 +336,26 @@ if not st.session_state.user_nom:
 nom    = st.session_state.user_nom
 equipe = st.session_state.user_equipe
 
+# Connexion Google Sheets
+sheet = get_sheet()
+if sheet:
+    init_sheet_headers(sheet)
+
 # Header
 st.markdown(f"""
 <div class="main-header">
   <div class="badge">USAGE INTERNE MAILEVA</div>
   <h1>💬 Talk IA — Evaluateur</h1>
-  <p>Testez Talk IA sur Maileva Docs e-Facture, notez les reponses et exportez les resultats.</p>
+  <p>Testez Talk IA sur Maileva Docs e-Facture et notez les reponses.</p>
 </div>
 <div class="user-banner">
-  Connecte en tant que : <strong>{nom}</strong> &nbsp;·&nbsp; Equipe : <strong>{equipe}</strong>
+  Connecte en tant que : <strong>{nom}</strong>
+  &nbsp;·&nbsp; Equipe : <strong>{equipe}</strong>
+  &nbsp;·&nbsp; {'✅ Google Sheets connecte' if sheet else '⚠️ Google Sheets non connecte'}
 </div>
 """, unsafe_allow_html=True)
 
-# ==============================================================================
-#  STATISTIQUES
-# ==============================================================================
+# ── Stats de la session en cours ───────────────────────────────────────────────
 
 if st.session_state.history:
     scores = [r["score"] for r in st.session_state.history]
@@ -309,9 +384,7 @@ if st.session_state.history:
     </div>
     """, unsafe_allow_html=True)
 
-# ==============================================================================
-#  ZONE DE QUESTION
-# ==============================================================================
+# ── Zone de question ───────────────────────────────────────────────────────────
 
 st.markdown("<hr class='soft'>", unsafe_allow_html=True)
 st.markdown("### Pose une question a Talk IA")
@@ -326,8 +399,6 @@ question_input = st.text_input(
 col_btn, _ = st.columns([2, 5])
 with col_btn:
     envoyer = st.button("Envoyer a Talk IA", type="primary", use_container_width=True)
-
-# ── Appel Talk IA ─────────────────────────────────────────────────────────────
 
 if envoyer:
     if not question_input.strip():
@@ -351,7 +422,6 @@ if envoyer:
 
                 if resp.status_code == 200:
                     raw    = resp.json()
-                    st.code(str(raw))
                     answer = (
                         raw.get("answer")
                         or raw.get("response")
@@ -381,9 +451,7 @@ if envoyer:
             except Exception as e:
                 st.error(f"Erreur : {e}")
 
-# ==============================================================================
-#  NOTATION
-# ==============================================================================
+# ── Notation ───────────────────────────────────────────────────────────────────
 
 if st.session_state.pending:
     p = st.session_state.pending
@@ -427,47 +495,50 @@ if st.session_state.pending:
         annuler = st.button("Ignorer cette reponse", use_container_width=True)
 
     if valider:
-        st.session_state.history.append({
+        entry = {
             **p,
             "score":       score,
             "explication": explication.strip(),
-        })
+        }
+
+        # Sauvegarde dans Google Sheets
+        if sheet:
+            saved = save_to_sheet(sheet, entry)
+            if saved:
+                st.markdown("""
+                <div class="saved-banner">
+                  ✅ Evaluation sauvegardee dans Google Sheets
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.warning("Evaluation enregistree en local mais echec de la sauvegarde Google Sheets.")
+        else:
+            st.warning("Google Sheets non connecte — evaluation enregistree en local uniquement.")
+
+        st.session_state.history.append(entry)
         st.session_state.pending = None
-        st.success(f"Note {score}/5 enregistree !")
         st.rerun()
 
     if annuler:
         st.session_state.pending = None
         st.rerun()
 
-# ==============================================================================
-#  HISTORIQUE + EXPORT
-# ==============================================================================
+# ── Historique de la session ───────────────────────────────────────────────────
 
 if st.session_state.history:
     st.markdown("<hr class='soft'>", unsafe_allow_html=True)
-
-    col_titre, col_export = st.columns([3, 2])
-    with col_titre:
-        st.markdown(f"### Mes evaluations ({len(st.session_state.history)})")
-    with col_export:
-        excel_data = _build_excel(st.session_state.history)
-        st.download_button(
-            label="Telecharger Excel",
-            data=excel_data,
-            file_name=f"evaluations_talk_ia_{nom.replace(' ','_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            type="primary",
-        )
+    st.markdown(f"### Mes evaluations cette session ({len(st.session_state.history)})")
+    st.caption("Toutes vos evaluations sont automatiquement sauvegardees dans Google Sheets.")
 
     for entry in reversed(st.session_state.history):
         s     = entry["score"]
-        label = {5:"Excellente",4:"Bonne",3:"Correcte",2:"Insuffisante",1:"Mauvaise"}.get(s,"")
+        label = {5:"Excellente",4:"Bonne",3:"Correcte",2:"Insuffisante",1:"Mauvaise"}.get(s, "")
         stars = "★" * s + "☆" * (5 - s)
-        expl  = (f"<br><span style='font-size:0.85rem;color:#6b7280;'>"
-                 f"Commentaire : {entry['explication']}</span>"
-                 if entry.get("explication") else "")
+        expl  = (
+            f"<br><span style='font-size:0.85rem;color:#6b7280;'>"
+            f"Commentaire : {entry['explication']}</span>"
+            if entry.get("explication") else ""
+        )
 
         st.markdown(f"""
         <div class="card">
@@ -479,7 +550,7 @@ if st.session_state.history:
           <div class="bubble-q">Q : {entry['question']}</div>
           <div style="font-size:0.9rem;color:#374151;line-height:1.6;
                       padding:6px 0;white-space:pre-wrap;">
-            {entry['answer'][:500]}{'...' if len(entry['answer'])>500 else ''}
+            {entry['answer'][:500]}{'...' if len(entry['answer']) > 500 else ''}
           </div>
           <span class="sbadge s{s}">{stars} {label}</span>
           {expl}
@@ -491,198 +562,3 @@ if st.session_state.history:
         st.session_state.history = []
         st.session_state.pending = None
         st.rerun()
-
-# ==============================================================================
-#  GENERATION EXCEL
-# ==============================================================================
-
-def _build_excel(history: list) -> bytes:
-
-    C_BLUE  = "0018A8"
-    C_TEAL  = "00C8A0"
-    C_WHITE = "FFFFFF"
-    C_DARK  = "002080"
-    C_GREEN = "D5F5E3"
-    C_ORNG  = "FEF9E7"
-    C_RED   = "FADBD8"
-
-    def _f(h):   return PatternFill("solid", fgColor=h)
-    def _ft(bold=False, size=10, color="000000"):
-        return Font(name="Calibri", size=size, bold=bold, color=color)
-    def _a(h="left", v="center", wrap=True):
-        return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
-    def _b():
-        s = Side(border_style="thin", color="D1D5DB")
-        return Border(left=s, right=s, top=s, bottom=s)
-    def _sbg(s):
-        return C_GREEN if s >= 4 else (C_ORNG if s == 3 else C_RED)
-
-    wb = openpyxl.Workbook()
-
-    # ── Onglet 1 : Toutes les evaluations ─────────────────────────────────────
-    ws = wb.active
-    ws.title = "Toutes les evaluations"
-    ws.sheet_view.showGridLines = False
-
-    ws.merge_cells("A1:H1")
-    c = ws["A1"]
-    c.value     = "EVALUATIONS TALK IA - Maileva Docs e-Facture"
-    c.font      = _ft(bold=True, size=14, color=C_WHITE)
-    c.fill      = _f(C_BLUE)
-    c.alignment = _a("center")
-    ws.row_dimensions[1].height = 30
-
-    ws.merge_cells("A2:H2")
-    c2 = ws["A2"]
-    c2.value     = (f"Exporte le {datetime.datetime.now().strftime('%d/%m/%Y a %H:%M')}"
-                    f"   -   {len(history)} evaluations")
-    c2.font      = _ft(size=10, color=C_WHITE)
-    c2.fill      = _f(C_DARK)
-    c2.alignment = _a("center")
-    ws.row_dimensions[2].height = 18
-
-    COLS = [
-        ("#",            4),
-        ("Date/Heure",  18),
-        ("Evaluateur",  22),
-        ("Equipe",      15),
-        ("Question",    52),
-        ("Reponse",     72),
-        ("Score /5",     9),
-        ("Commentaire", 52),
-    ]
-    for col, (h, w) in enumerate(COLS, 1):
-        c = ws.cell(row=3, column=col, value=h)
-        c.font      = _ft(bold=True, size=11, color=C_WHITE)
-        c.fill      = _f(C_TEAL)
-        c.alignment = _a("center", wrap=False)
-        c.border    = _b()
-        ws.column_dimensions[get_column_letter(col)].width = w
-    ws.row_dimensions[3].height = 26
-
-    for i, r in enumerate(history, 1):
-        row   = i + 3
-        score = r.get("score", 0)
-        bg    = "F9FAFB" if i % 2 == 0 else C_WHITE
-
-        for col, val in enumerate([
-            i,
-            r.get("timestamp", ""),
-            r.get("nom", ""),
-            r.get("equipe", ""),
-            r.get("question", ""),
-            r.get("answer", ""),
-            score,
-            r.get("explication", ""),
-        ], 1):
-            c        = ws.cell(row=row, column=col, value=val)
-            c.border = _b()
-            if col == 7:
-                c.fill      = _f(_sbg(score))
-                c.alignment = _a("center", wrap=False)
-                c.font      = _ft(bold=True, size=13)
-            else:
-                c.fill      = _f(bg)
-                c.alignment = _a("left", "top", True)
-                c.font      = _ft(size=10)
-        ws.row_dimensions[row].height = 80
-
-    ws.freeze_panes = "A4"
-    ws.auto_filter.ref = f"A3:H{len(history)+3}"
-
-    # ── Onglet 2 : Stats par evaluateur ───────────────────────────────────────
-    ws2 = wb.create_sheet("Stats par evaluateur")
-    ws2.sheet_view.showGridLines = False
-
-    ws2.merge_cells("A1:F1")
-    t = ws2["A1"]
-    t.value     = "Performances par evaluateur"
-    t.font      = _ft(bold=True, size=13, color=C_WHITE)
-    t.fill      = _f(C_BLUE)
-    t.alignment = _a("center")
-    ws2.row_dimensions[1].height = 28
-
-    COLS2 = [
-        ("Evaluateur",     24),
-        ("Equipe",         16),
-        ("Nb questions",   14),
-        ("Score moyen /5", 16),
-        ("% Bonnes (>=4)", 16),
-        ("% Mauvaises (<=2)", 18),
-    ]
-    for col, (h, w) in enumerate(COLS2, 1):
-        c = ws2.cell(row=2, column=col, value=h)
-        c.font      = _ft(bold=True, size=11, color=C_WHITE)
-        c.fill      = _f(C_TEAL)
-        c.alignment = _a("center", wrap=False)
-        c.border    = _b()
-        ws2.column_dimensions[get_column_letter(col)].width = w
-    ws2.row_dimensions[2].height = 24
-
-    # Grouper par evaluateur
-    par_eval = defaultdict(list)
-    for r in history:
-        key = (r.get("nom", "Anonyme"), r.get("equipe", ""))
-        par_eval[key].append(r.get("score", 0))
-
-    row_n = 3
-    for (eval_nom, eval_eq), eval_scores in sorted(par_eval.items()):
-        n      = len(eval_scores) or 1
-        avg_s  = round(sum(eval_scores) / n, 2)
-        pct_ok = f"{round(sum(1 for s in eval_scores if s >= 4)/n*100, 1)} %"
-        pct_ko = f"{round(sum(1 for s in eval_scores if s <= 2)/n*100, 1)} %"
-        bg     = _sbg(avg_s)
-
-        for col, val in enumerate([eval_nom, eval_eq, n, avg_s, pct_ok, pct_ko], 1):
-            c        = ws2.cell(row=row_n, column=col, value=val)
-            c.font   = _ft(bold=(col in (4, 5)), size=11)
-            c.border = _b()
-            c.fill   = _f(bg if col in (4, 5) else ("F9FAFB" if row_n % 2 == 0 else C_WHITE))
-            c.alignment = _a("center" if col > 2 else "left", wrap=False)
-        row_n += 1
-
-    ws2.freeze_panes = "A3"
-
-    # ── Onglet 3 : Stats globales ──────────────────────────────────────────────
-    ws3 = wb.create_sheet("Stats globales")
-    ws3.sheet_view.showGridLines = False
-    ws3.column_dimensions["A"].width = 36
-    ws3.column_dimensions["B"].width = 22
-
-    ws3.merge_cells("A1:B1")
-    t3 = ws3["A1"]
-    t3.value     = "Statistiques globales"
-    t3.font      = _ft(bold=True, size=13, color=C_WHITE)
-    t3.fill      = _f(C_BLUE)
-    t3.alignment = _a("center")
-    ws3.row_dimensions[1].height = 28
-
-    all_scores = [r.get("score", 0) for r in history]
-    n          = len(all_scores) or 1
-
-    for row_i, (label, val) in enumerate([
-        ("Total evaluations",           len(history)),
-        ("Nombre d'evaluateurs",        len(par_eval)),
-        ("Score moyen global (/5)",     round(sum(all_scores)/n, 2)),
-        ("% Excellentes (5/5)",         f"{round(sum(1 for s in all_scores if s==5)/n*100,1)} %"),
-        ("% Bonnes (4/5)",              f"{round(sum(1 for s in all_scores if s==4)/n*100,1)} %"),
-        ("% Correctes (3/5)",           f"{round(sum(1 for s in all_scores if s==3)/n*100,1)} %"),
-        ("% Insuffisantes (2/5)",       f"{round(sum(1 for s in all_scores if s==2)/n*100,1)} %"),
-        ("% Mauvaises (1/5)",           f"{round(sum(1 for s in all_scores if s==1)/n*100,1)} %"),
-        ("Date export",                 datetime.datetime.now().strftime("%d/%m/%Y %H:%M")),
-    ], 2):
-        bg = "F3F4F6" if row_i % 2 == 0 else C_WHITE
-        cl = ws3.cell(row=row_i, column=1, value=label)
-        cv = ws3.cell(row=row_i, column=2, value=val)
-        for c in [cl, cv]:
-            c.fill      = _f(bg)
-            c.alignment = _a("left", wrap=False)
-        cl.font = _ft(size=11)
-        cv.font = _ft(bold=True, size=11, color=C_BLUE)
-        ws3.row_dimensions[row_i].height = 22
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.read()
-
